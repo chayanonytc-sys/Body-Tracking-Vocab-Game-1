@@ -1,0 +1,232 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>English Body Tracking Game</title>
+    
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.8/wasm/vision_bundle.js" crossorigin="anonymous"></script>
+    
+    <script src="https://cdn.tailwindcss.com"></script>
+    
+    <style>
+        .video-container {
+            transform: scaleX(-1); /* กลับกระจกเงาให้ใช้งานง่าย */
+        }
+    </style>
+</head>
+<body class="bg-slate-100 font-sans min-h-screen flex flex-col items-center justify-between p-4">
+
+    <header class="text-center my-2">
+        <h1 class="text-3xl font-bold text-indigo-600">🏃‍♂️ English Body Tracking Game</h1>
+        <p class="text-gray-600 text-sm mt-1">ขยับร่างกายให้ตรงกับคำศัพท์ภาษาอังกฤษ! (ป.4 - ม.2)</p>
+    </header>
+
+    <main class="w-full max-w-2xl bg-white rounded-2xl shadow-xl p-4 flex flex-col items-center gap-4 relative overflow-hidden">
+        
+        <div class="w-full flex justify-between items-center px-4">
+            <div class="text-left">
+                <span class="text-xs font-bold uppercase text-gray-400">Score</span>
+                <div id="score" class="text-2xl font-black text-emerald-500">0</div>
+            </div>
+            <div class="text-center bg-indigo-50 px-6 py-2 rounded-full border border-indigo-100">
+                <span class="text-xs font-bold uppercase text-indigo-400 block">ทำท่านี้!</span>
+                <div id="word-display" class="text-3xl font-extrabold text-indigo-700 animate-bounce">Loading...</div>
+            </div>
+            <div class="text-right">
+                <span class="text-xs font-bold uppercase text-gray-400">Status</span>
+                <div id="status" class="text-sm font-bold text-amber-500">กำลังโหลดโมเดล...</div>
+            </div>
+        </div>
+
+        <div class="relative w-full aspect-video rounded-xl overflow-hidden bg-slate-900 flex items-center justify-center border-4 border-indigo-500/20">
+            <video id="webcam" class="video-container absolute w-full h-full object-cover" autoplay playsinline></video>
+            <canvas id="output_canvas" class="video-container absolute w-full h-full object-cover top-0 left-0"></canvas>
+            
+            <div id="success-overlay" class="absolute inset-0 bg-emerald-500/40 flex items-center justify-center opacity-0 transition-opacity duration-300 pointer-events-none">
+                <span class="text-6xl font-black text-white drop-shadow-md">CORRECT! ✨</span>
+            </div>
+        </div>
+
+        <button id="startBtn" class="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-3 px-6 rounded-xl shadow-lg transition disabled:bg-gray-400" disabled>
+            เปิดกล้องและเริ่มเล่นเกม
+        </button>
+    </main>
+
+    <footer class="text-xs text-gray-400 my-2 text-center">
+        รองรับทั้ง PC, iOS และ Android (กรุณาอนุญาตสิทธิ์เข้าถึงกล้อง)
+    </footer>
+
+    <script type="module">
+        import { PoseLandmarker, FilesetResolver, DrawingUtils } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.8/wasm/vision_bundle.js";
+
+        // คลังคำศัพท์และท่าทาง (สามารถเพิ่ม/แก้ไข ตรงนี้ได้เลย)
+        const vocabulary = [
+            { word: "Raise Right Hand", action: "right_hand_up" },
+            { word: "Raise Left Hand", action: "left_hand_up" },
+            { word: "Touch Head", action: "touch_head" },
+            { word: "Hands on Hips", action: "hands_on_hips" },
+            { word: "Cross Arms", action: "cross_arms" }
+        ];
+
+        let currentTarget = null;
+        let score = 0;
+        let poseLandmarker = undefined;
+        let webcamRunning = false;
+        
+        const video = document.getElementById("webcam");
+        const canvasElement = document.getElementById("output_canvas");
+        const canvasCtx = canvasElement.getContext("2d");
+        const drawingUtils = new DrawingUtils(canvasCtx);
+        const startBtn = document.getElementById("startBtn");
+        const wordDisplay = document.getElementById("word-display");
+        const scoreDisplay = document.getElementById("score");
+        const statusDisplay = document.getElementById("status");
+        const successOverlay = document.getElementById("success-overlay");
+
+        // 1. โหลด AI Model จาก Mediapipe
+        async function createPoseLandmarker() {
+            const vision = await FilesetResolver.forVisionTasks(
+                "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.8/wasm"
+            );
+            poseLandmarker = await PoseLandmarker.createFromOptions(vision, {
+                baseOptions: {
+                    modelAssetPath: `https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite.task`,
+                    delegate: "GPU"
+                },
+                runningMode: "VIDEO",
+                numPoses: 1
+            });
+            statusDisplay.innerText = "พร้อมใช้งาน";
+            statusDisplay.className = "text-sm font-bold text-emerald-500";
+            startBtn.disabled = false;
+            nextWord();
+        }
+        createPoseLandmarker();
+
+        // 2. ฟังก์ชันสุ่มคำศัพท์ถัดไป
+        function nextWord() {
+            const randomIndex = Math.floor(Math.random() * vocabulary.length);
+            currentTarget = vocabulary[randomIndex];
+            wordDisplay.innerText = currentTarget.word;
+        }
+
+        // 3. ระบบตรวจจับและเปิดกล้อง
+        startBtn.addEventListener("click", toggleWebcam);
+
+        function toggleWebcam() {
+            if (!poseLandmarker) return;
+
+            if (webcamRunning === true) {
+                webcamRunning = false;
+                startBtn.innerText = "เริ่มเล่นเกม";
+                video.srcObject.getTracks().forEach(track => track.stop());
+            } else {
+                webcamRunning = true;
+                startBtn.innerText = "หยุดเกม";
+                
+                // รองรับเปิดกล้องบนมือถือและแท็บเล็ต
+                const constraints = {
+                    video: { width: 640, height: 480, facingMode: "user" }
+                };
+
+                navigator.mediaDevices.getUserMedia(constraints).then((stream) => {
+                    video.srcObject = stream;
+                    video.addEventListener("loadeddata", predictWebcam);
+                }).catch(err => {
+                    alert("ไม่สามารถเข้าถึงกล้องได้: " + err);
+                });
+            }
+        }
+
+        let lastVideoTime = -1;
+        async function predictWebcam() {
+            if (!webcamRunning) return;
+
+            // ปรับขนาด Canvas ให้เท่ากับวิดีโอจริง
+            canvasElement.style.width = video.videoWidth + "px";
+            canvasElement.style.height = video.videoHeight + "px";
+            canvasElement.width = video.videoWidth;
+            canvasElement.height = video.videoHeight;
+
+            let startTimeMs = performance.now();
+            if (lastVideoTime !== video.currentTime) {
+                lastVideoTime = video.currentTime;
+                poseLandmarker.detectForVideo(video, startTimeMs, (result) => {
+                    canvasCtx.clearRect(0, 0, canvasElement.width, canvasElement.height);
+                    
+                    if (result.landmarks.length > 0) {
+                        const landmarks = result.landmarks[0];
+                        
+                        // วาดเส้นโครงกระดูกแสดงร่างกาย
+                        drawingUtils.drawConnectors(landmarks, PoseLandmarker.POSE_CONNECTIONS);
+                        drawingUtils.drawLandmarks(landmarks, { radius: 4 });
+
+                        // ตรวจสอบท่าทาง
+                        checkAction(landmarks);
+                    }
+                });
+            }
+            window.requestAnimationFrame(predictWebcam);
+        }
+
+        // 4. ตรรกะการตรวจสอบท่าทาง (AI Logic)
+        function checkAction(lm) {
+            if (!currentTarget) return;
+
+            // ดึงจุดพิกัดสำคัญ (อ้างอิงตาม Mediapipe Pose)
+            const nose = lm[0];
+            const leftWrist = lm[15];
+            const rightWrist = lm[16];
+            const leftHip = lm[23];
+            const rightHip = lm[24];
+
+            let isCorrect = false;
+
+            switch(currentTarget.action) {
+                case "right_hand_up":
+                    // มือขวาอยู่สูงกว่าจมูก
+                    if (rightWrist.y < nose.y) isCorrect = true;
+                    break;
+                case "left_hand_up":
+                    // มือซ้ายอยู่สูงกว่าจมูก
+                    if (leftWrist.y < nose.y) isCorrect = true;
+                    break;
+                case "touch_head":
+                    // มือทั้งสองข้างหรือข้างใดข้างหนึ่งอยู่ระดับเดียวกับหัว/จมูกในระยะประชิด
+                    if (Math.abs(rightWrist.y - nose.y) < 0.1 && Math.abs(rightWrist.x - nose.x) < 0.15) isCorrect = true;
+                    if (Math.abs(leftWrist.y - nose.y) < 0.1 && Math.abs(leftWrist.x - nose.x) < 0.15) isCorrect = true;
+                    break;
+                case "hands_on_hips":
+                    // ข้อมืออยู่ใกล้สะโพก
+                    if (Math.abs(rightWrist.y - rightHip.y) < 0.1 && Math.abs(leftWrist.y - leftHip.y) < 0.1) isCorrect = true;
+                    break;
+                case "cross_arms":
+                    // มือขวาอยู่ฝั่งซ้าย และมือซ้ายอยู่ฝั่งขวา (กอดอก)
+                    if (rightWrist.x < leftWrist.x) isCorrect = true;
+                    break;
+            }
+
+            if (isCorrect) {
+                handleCorrectAnswer();
+            }
+        }
+
+        // 5. เมื่อตอบถูก
+        function handleCorrectAnswer() {
+            // ล็อคชั่วคราวไม่ให้คะแนนรัวซ้ำ
+            currentTarget = null; 
+            score++;
+            scoreDisplay.innerText = score;
+
+            // แสดงเอฟเฟกต์ Correct!
+            successOverlay.style.opacity = "1";
+            
+            setTimeout(() => {
+                successOverlay.style.opacity = "0";
+                nextWord();
+            }, 1500); // รอ 1.5 วินาทีก่อนเริ่มคำถัดไป
+        }
+    </script>
+</body>
+</html>
